@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, Modality } from "@google/genai";
+import { GoogleGenAI, Type, Modality, VideoGenerationReferenceType } from "@google/genai";
 import { Scene, Story, VoiceName, AspectRatio } from "../types";
 import { decodeBase64 } from "./audioUtils";
 
@@ -279,35 +279,76 @@ export const generateVeoScene = async (prompt: string, aspectRatio: AspectRatio,
     }
 };
 
+// Deprecated singular version - keeping for backward compatibility but redirecting logic
 export const generateVeoTransition = async (startImageB64: string, endImageB64: string, aspectRatio: AspectRatio): Promise<string | null> => {
+    return generateVeoSequence([startImageB64, endImageB64], aspectRatio);
+};
+
+/**
+ * Generates a Veo video sequence from up to 3 reference images.
+ * Selects 'veo-3.1-generate-preview' if 3 images + 16:9, otherwise 'veo-3.1-fast-generate-preview'.
+ */
+export const generateVeoSequence = async (imagesB64: string[], aspectRatio: AspectRatio): Promise<string | null> => {
     await checkVeoSetup();
-    
+
     const executeGeneration = async (): Promise<string | null> => {
         const ai = getClient();
         const key = getApiKey();
-        const model = 'veo-3.1-fast-generate-preview';
         
-        const startBytes = startImageB64.replace(/^data:image\/\w+;base64,/, "");
-        const endBytes = endImageB64.replace(/^data:image\/\w+;base64,/, "");
-
-        let operation = await ai.models.generateVideos({
-            model: model,
-            prompt: "Smooth cinematic morphing transition between these two scenes", // Optional prompt
-            image: {
-                imageBytes: startBytes,
-                mimeType: 'image/jpeg'
-            },
-            config: {
-                numberOfVideos: 1,
-                resolution: '720p',
-                aspectRatio: aspectRatio,
-                lastFrame: {
-                    imageBytes: endBytes,
+        // Clean all images
+        const cleanImages = imagesB64.map(img => img.replace(/^data:image\/\w+;base64,/, ""));
+        
+        let operation;
+        
+        // Logic: Use Veo 3.1 (High Quality) if we have 3 images and 16:9 (as required by capabilities)
+        // Otherwise use Veo Fast with Image + LastFrame
+        if (cleanImages.length >= 3 && aspectRatio === '16:9') {
+            console.log("Using Veo 3.1 Preview (3 Images)");
+            const referenceImagesPayload = cleanImages.slice(0, 3).map(img => ({
+                image: {
+                    imageBytes: img,
                     mimeType: 'image/jpeg'
-                }
-            }
-        });
+                },
+                referenceType: VideoGenerationReferenceType.ASSET
+            }));
 
+            operation = await ai.models.generateVideos({
+                model: 'veo-3.1-generate-preview',
+                prompt: "A seamless cinematic story sequence connecting these scenes.",
+                config: {
+                    numberOfVideos: 1,
+                    referenceImages: referenceImagesPayload,
+                    resolution: '720p',
+                    aspectRatio: '16:9'
+                }
+            });
+
+        } else {
+            // Fallback to Fast model (2 images max)
+            console.log("Using Veo 3.1 Fast Preview (2 Images)");
+            const startBytes = cleanImages[0];
+            const endBytes = cleanImages[cleanImages.length - 1]; // Use last image as target
+
+            operation = await ai.models.generateVideos({
+                model: 'veo-3.1-fast-generate-preview',
+                prompt: "Smooth cinematic morphing transition between these two scenes",
+                image: {
+                    imageBytes: startBytes,
+                    mimeType: 'image/jpeg'
+                },
+                config: {
+                    numberOfVideos: 1,
+                    resolution: '720p',
+                    aspectRatio: aspectRatio,
+                    lastFrame: {
+                        imageBytes: endBytes,
+                        mimeType: 'image/jpeg'
+                    }
+                }
+            });
+        }
+
+        // Polling
         while (!operation.done) {
             await new Promise(resolve => setTimeout(resolve, 5000));
             operation = await ai.operations.getVideosOperation({ operation: operation });
@@ -334,10 +375,11 @@ export const generateVeoTransition = async (startImageB64: string, endImageB64: 
                 return await executeGeneration();
              }
         }
-        console.error("Veo transition generation failed", e);
+        console.error("Veo sequence generation failed", e);
         return null;
     }
 };
+
 
 export const generateVoiceover = async (text: string, voice: VoiceName): Promise<ArrayBuffer> => {
   const ai = getClient();

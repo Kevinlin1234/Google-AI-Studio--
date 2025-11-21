@@ -2,9 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Story, Scene } from '../types';
 import { getAudioContext, decodeAudioData } from '../services/audioUtils';
 import { generateStoryVideo } from '../services/videoRecorder';
-import { generateVeoScene, generateVeoTransition, generateCoverImage, checkVeoSetup } from '../services/geminiService';
+import { generateVeoScene, generateVeoSequence, generateCoverImage, checkVeoSetup } from '../services/geminiService';
 import { addTitleToCover } from '../services/imageProcessor';
-import { ChevronLeft, ChevronRight, Play, Pause, RefreshCw, Volume2, Expand, Shrink, Download, Video, Share2, CheckCircle, Sparkles, Loader2, Film, X, Image as ImageIcon, Wand2, Eye, PlayCircle, Layers } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Play, Pause, RefreshCw, Volume2, Expand, Shrink, Download, Video, Share2, CheckCircle, Sparkles, Loader2, Film, X, Image as ImageIcon, Wand2, Eye, PlayCircle, Layers, Clock } from 'lucide-react';
 import { Button } from './Button';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -193,9 +193,15 @@ export const StoryPlayer: React.FC<StoryPlayerProps> = ({ story, onBack, isImmer
       setVeoError(null);
       
       try {
-          const transitionUrl = await generateVeoTransition(
-              currentScene.imageData,
-              nextScene.imageData,
+          // Try to use 3 images for context if available
+          const nextNextScene = story.scenes[currentIndex + 2];
+          const images = [currentScene.imageData, nextScene.imageData];
+          if (nextNextScene && nextNextScene.imageData) {
+              images.push(nextNextScene.imageData);
+          }
+
+          const transitionUrl = await generateVeoSequence(
+              images,
               story.aspectRatio
           );
           
@@ -224,35 +230,51 @@ export const StoryPlayer: React.FC<StoryPlayerProps> = ({ story, onBack, isImmer
       let successCount = 0;
       const totalTransitions = story.scenes.length - 1;
 
+      // Iterate through all scenes
       for (let i = 0; i < totalTransitions; i++) {
           const scene = story.scenes[i];
-          const next = story.scenes[i+1];
-
+          
           // Skip if already exists
           if (scene.transitionVideoUrl) {
               successCount++;
               continue;
           }
 
-          setBatchProgress(`正在生成转场 ${i+1} / ${totalTransitions}...`);
+          setBatchProgress(`正在生成转场 ${i+1} / ${totalTransitions} (Veo)...`);
+
+          // Collect images: [Current, Next] + (NextNext if available for context)
+          // This utilizes the 3-image capability of Veo 3.1 if possible
+          const images: string[] = [];
+          if (scene.imageData) images.push(scene.imageData);
+          if (story.scenes[i+1]?.imageData) images.push(story.scenes[i+1].imageData!);
+          if (story.scenes[i+2]?.imageData) images.push(story.scenes[i+2].imageData!);
           
+          if (images.length < 2) continue; // Need at least 2
+
           // Generate
           try {
-              if (scene.imageData && next.imageData) {
-                  const url = await generateVeoTransition(scene.imageData, next.imageData, story.aspectRatio);
-                  if (url) {
-                      scene.transitionVideoUrl = url;
-                      successCount++;
-                  }
+              const url = await generateVeoSequence(images, story.aspectRatio);
+              if (url) {
+                  scene.transitionVideoUrl = url;
+                  successCount++;
               }
           } catch (e) {
               console.error(`Failed to generate transition for scene ${i}`, e);
+          }
+
+          // Handle Rate Limit (RPM 2)
+          // If we are not at the end, wait for ~35 seconds
+          if (i < totalTransitions - 1) {
+              for (let s = 35; s > 0; s--) {
+                  setBatchProgress(`冷却中 (RPM限制): 剩余 ${s} 秒...`);
+                  await new Promise(r => setTimeout(r, 1000));
+              }
           }
       }
       
       setIsBatchGenerating(false);
       if (successCount === totalTransitions) {
-          alert("所有转场生成完毕！");
+          alert("所有转场生成完毕！您可以预览拼接全片了。");
       } else {
           alert(`转场生成结束，成功 ${successCount}/${totalTransitions}`);
       }
@@ -800,7 +822,7 @@ export const StoryPlayer: React.FC<StoryPlayerProps> = ({ story, onBack, isImmer
                 <div className="text-xl font-bold mb-2">
                     {isBatchGenerating ? '正在施展魔法...' : '正在制作大片'}
                 </div>
-                <div className="text-sm text-slate-300 mb-6">
+                <div className="text-sm text-slate-300 mb-6 font-mono">
                     {isBatchGenerating ? batchProgress : exportStatus}
                 </div>
                 <div className="w-full max-w-[200px] h-2 bg-slate-700 rounded-full overflow-hidden">
@@ -814,8 +836,8 @@ export const StoryPlayer: React.FC<StoryPlayerProps> = ({ story, onBack, isImmer
                       <div className="h-full bg-purple-500 animate-indeterminate-bar w-1/2 mx-auto rounded-full" />
                   )}
                 </div>
-                <p className="mt-4 text-xs text-slate-400">
-                    {isBatchGenerating ? '批量生成转场需要一些时间，请耐心等待' : 'AI 导演正在剪辑视频...'}
+                <p className="mt-4 text-xs text-slate-400 max-w-xs">
+                    {isBatchGenerating ? 'Veo模型每分钟限制生成2次，我们将自动为您排队处理，请耐心等待...' : 'AI 导演正在剪辑视频...'}
                 </p>
              </div>
           )}
